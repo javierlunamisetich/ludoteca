@@ -14,7 +14,17 @@ const topicSearchInput = document.querySelector('#topicSearch');
 const counter = document.querySelector('#matchCount');
 const results = document.querySelector('#results');
 const resetBtn = document.querySelector('#resetFilters');
+const gameDetailDialog = document.querySelector('#gameDetailDialog');
+const gameDetailContent = document.querySelector('#gameDetailContent');
+const gameDetailClose = document.querySelector('#gameDetailClose');
 const TOP_FILTER_CHIPS_LIMIT = 10;
+const htmlEscapeMap = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+};
 
 function buildTopFrequencyChips(games, groupSelector, fieldName) {
     const group = document.querySelector(`[data-filter="${groupSelector}"]`);
@@ -149,6 +159,173 @@ function tokenizeSearchText(value) {
         .filter(Boolean);
 }
 
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => htmlEscapeMap[char]);
+}
+
+function splitTextList(value) {
+    return String(value || '')
+        .split(',')
+        .map(item => item.trim())
+        .filter(Boolean);
+}
+
+function normalizeList(value, fallback = '') {
+    if (Array.isArray(value)) {
+        return value.map(item => String(item || '').trim()).filter(Boolean);
+    }
+    return splitTextList(fallback || value);
+}
+
+function formatDecimal(value, digits = 1) {
+    if (value === null || value === undefined || value === '') return '';
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(digits) : '';
+}
+
+function getGameUrl(row) {
+    if (row.bgg_url) return row.bgg_url;
+    if (!row.bgg_id) return '';
+    return `https://boardgamegeek.com/boardgame/${encodeURIComponent(row.bgg_id)}`;
+}
+
+function getGameDetails(row) {
+    const score = formatDecimal(row.score);
+    const minutesLabel = row.minutos_label || '';
+    const duration = minutesLabel
+        ? (String(minutesLabel).toLowerCase().includes('min') ? minutesLabel : `${minutesLabel} min`)
+        : (row.longitud || 'Duración variable');
+    const players = row.jugadores || 'Jugadores variables';
+    const communityPlayers = row.jugadores_comunidad || row.community_players || row.suggested_numplayers || '';
+    const bestPlayers = row.mejor_jugadores || row.best_players || '';
+    const communityInfo = [
+        communityPlayers ? `Comunidad: ${communityPlayers}` : '',
+        bestPlayers ? `Mejor: ${bestPlayers}` : ''
+    ].filter(Boolean).join(' · ');
+    const minAge = row.edad_minima ?? row.min_age ?? null;
+    const communityAge = row.edad_comunidad ?? row.community_age ?? '';
+    const ageInfo = minAge ? `${minAge}+` : '';
+    const complexityNumber = formatDecimal(row.complejidad_num);
+    const complexity = row.complejidad
+        ? `${row.complejidad}${complexityNumber ? ` (${complexityNumber}/5)` : ''}`
+        : (complexityNumber ? `${complexityNumber}/5` : 'Sin dato');
+    const categories = normalizeList(row.categorias, row.categorias_str);
+    const mechanics = normalizeList(row.mecanicas, row.mecanicas_str);
+    const rank = row.ranking_bgg || row.bgg_rank || '';
+
+    return {
+        title: row.juego || 'Juego sin nombre',
+        originalName: row.nombre_excel || '',
+        categoryText: row.categorias_str || categories.join(', '),
+        score: score || '-',
+        duration,
+        players,
+        communityPlayers,
+        bestPlayers,
+        communityInfo,
+        ageInfo,
+        communityAge,
+        complexity,
+        categories,
+        mechanics,
+        families: normalizeList(row.familias, row.familias_str || row.families_str),
+        description: row.descripcion || row.description || '',
+        image: row.imagen || row.image || row.thumbnail || '',
+        year: row.anio_publicacion || row.yearpublished || row.year_published || '',
+        rank: rank ? String(rank) : '',
+        authors: normalizeList(row.autores, row.autores_str || row.designers_str),
+        publishers: normalizeList(row.editoriales, row.editoriales_str || row.publishers_str),
+        location: row.ubicacion || '',
+        bggId: row.bgg_id || '',
+        bggUrl: getGameUrl(row)
+    };
+}
+
+function renderDetailFact(label, value) {
+    if (!value) return '';
+    return `
+        <div class="detail-fact">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value)}</strong>
+        </div>
+    `;
+}
+
+function renderDetailTags(values) {
+    if (!values.length) return '<p class="detail-empty">Sin datos cargados.</p>';
+    return `<div class="detail-tags">${values.map(value => `<span>${escapeHtml(value)}</span>`).join('')}</div>`;
+}
+
+function openGameDetail(row) {
+    if (!gameDetailDialog || !gameDetailContent) return;
+
+    const details = getGameDetails(row);
+    const imageBlock = details.image
+        ? `<img class="game-detail-image" src="${escapeHtml(details.image)}" alt="${escapeHtml(details.title)}">`
+        : `<div class="game-detail-placeholder">${escapeHtml(details.title.slice(0, 2).toUpperCase())}</div>`;
+    const description = details.description || 'Todavía no hay descripción cargada para este juego.';
+    const facts = [
+        ['Jugadores', details.players],
+        ['Comunidad', details.communityPlayers],
+        ['Mejor', details.bestPlayers],
+        ['Duración', details.duration],
+        ['Edad', details.ageInfo],
+        ['Edad comunidad', details.communityAge ? `${details.communityAge}+` : ''],
+        ['Complejidad', details.complexity],
+        ['Puntaje BGG', details.score],
+        ['Ranking BGG', details.rank ? `#${details.rank}` : ''],
+        ['Año', details.year ? String(details.year) : ''],
+        ['Autores', details.authors.slice(0, 4).join(', ')],
+        ['Editoriales', details.publishers.slice(0, 4).join(', ')],
+        ['Ubicación', details.location]
+    ];
+    const familiesSection = details.families.length
+        ? `
+            <section class="detail-section">
+                <h3>Familias</h3>
+                ${renderDetailTags(details.families)}
+            </section>
+        `
+        : '';
+
+    gameDetailContent.innerHTML = `
+        <div class="game-detail-hero">
+            <div class="game-detail-media">${imageBlock}</div>
+            <div class="game-detail-heading">
+                <p class="game-detail-kicker">${details.bggId ? `BGG #${escapeHtml(details.bggId)}` : 'Detalle'}</p>
+                <h2 id="gameDetailTitle">${escapeHtml(details.title)}</h2>
+                <p>${escapeHtml(details.categoryText || 'Sin categorías')}</p>
+                ${details.originalName && details.originalName !== details.title ? `<p class="detail-origin">Excel: ${escapeHtml(details.originalName)}</p>` : ''}
+                ${details.bggUrl ? `<a class="bgg-link" href="${escapeHtml(details.bggUrl)}" target="_blank" rel="noopener noreferrer">Ver en BGG</a>` : ''}
+            </div>
+        </div>
+        <div class="game-detail-body">
+            <div class="detail-facts">
+                ${facts.map(([label, value]) => renderDetailFact(label, value)).join('')}
+            </div>
+            <section class="detail-section">
+                <h3>Descripción</h3>
+                <p class="detail-description">${escapeHtml(description)}</p>
+            </section>
+            <section class="detail-section">
+                <h3>Categorías</h3>
+                ${renderDetailTags(details.categories)}
+            </section>
+            <section class="detail-section">
+                <h3>Mecánicas</h3>
+                ${renderDetailTags(details.mechanics)}
+            </section>
+            ${familiesSection}
+        </div>
+    `;
+
+    if (typeof gameDetailDialog.showModal === 'function') {
+        gameDetailDialog.showModal();
+    } else {
+        gameDetailDialog.setAttribute('open', '');
+    }
+}
+
 function setGamesDataset(games) {
     currentGames = (games || []).map(game => ({
         ...game,
@@ -237,6 +414,18 @@ function setupEventListeners() {
             if (topicSearchInput) topicSearchInput.value = '';
             syncAllFilterGroups();
             applyFilters();
+        });
+    }
+
+    if (gameDetailDialog && gameDetailClose) {
+        gameDetailClose.addEventListener('click', () => {
+            gameDetailDialog.close();
+        });
+
+        gameDetailDialog.addEventListener('click', event => {
+            if (event.target === gameDetailDialog) {
+                gameDetailDialog.close();
+            }
         });
     }
 }
@@ -364,47 +553,38 @@ function render(rows, options = {}) {
     rows.forEach((row) => {
         const card = document.createElement('article');
         card.className = 'card';
-        const score = row.score !== null && row.score !== undefined ? Number(row.score).toFixed(1) : '–';
-        const durationLabel = row.minutos_label || row.longitud;
-        const duration = durationLabel ? (String(durationLabel).toLowerCase().includes('min') ? durationLabel : `${durationLabel} min`) : 'Duración variable';
-        const players = row.jugadores || 'Jugadores variables';
-        const communityPlayers = row.jugadores_comunidad || row.community_players || row.suggested_numplayers || '';
-        const bestPlayers = row.mejor_jugadores || row.best_players || '';
-        const communityInfo = [
-            communityPlayers ? `Comunidad: ${communityPlayers}` : '',
-            bestPlayers ? `Mejor: ${bestPlayers}` : ''
-        ].filter(Boolean).join(' · ');
-        const minAge = row.edad_minima ?? row.min_age ?? null;
-        const communityAge = row.edad_comunidad ?? row.community_age ?? '';
-        const ageInfo = minAge ? `${minAge}+` : '';
-        const complexityNumber = row.complejidad_num !== null && row.complejidad_num !== undefined && !Number.isNaN(Number(row.complejidad_num))
-            ? Number(row.complejidad_num).toFixed(1)
-            : '';
-        const complexity = row.complejidad
-            ? `${row.complejidad}${complexityNumber ? ` (${complexityNumber}/5)` : ''}`
-            : (complexityNumber ? `${complexityNumber}/5` : 'Sin dato');
-        const categories = Array.isArray(row.categorias) ? row.categorias.slice(0, 3) : [];
-        const mechanics = Array.isArray(row.mecanicas) ? row.mecanicas.slice(0, 2) : [];
+        const details = getGameDetails(row);
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+        card.setAttribute('aria-label', `Abrir detalle de ${details.title}`);
 
         card.innerHTML = `
       <div>
-        <h2>${row.juego || 'Juego sin nombre'}</h2>
-        <p class="subtitle">${row.categorias_str || 'Sin categorías'}</p>
+        <h2>${escapeHtml(details.title)}</h2>
+        <p class="subtitle">${escapeHtml(details.categoryText || 'Sin categorías')}</p>
       </div>
       <div class="meta">
-        <span><strong>${players}</strong> jugadores</span>
-        ${communityInfo ? `<span>${communityInfo}</span>` : ''}
-        <span>${duration}</span>
-        ${ageInfo ? `<span>Edad: <strong>${ageInfo}</strong>${communityAge ? ` · Comunidad: ${communityAge}+` : ''}</span>` : ''}
-        <span>Complejidad: <strong>${complexity}</strong></span>
-        <span class="score">Puntaje ${score}</span>
-        ${row.ubicacion ? `<span style="opacity:.75">Ubicación: ${row.ubicacion}</span>` : ''}
+        <span><strong>${escapeHtml(details.players)}</strong> jugadores</span>
+        ${details.communityInfo ? `<span>${escapeHtml(details.communityInfo)}</span>` : ''}
+        <span>${escapeHtml(details.duration)}</span>
+        ${details.ageInfo ? `<span>Edad: <strong>${escapeHtml(details.ageInfo)}</strong>${details.communityAge ? ` · Comunidad: ${escapeHtml(details.communityAge)}+` : ''}</span>` : ''}
+        <span>Complejidad: <strong>${escapeHtml(details.complexity)}</strong></span>
+        <span class="score">Puntaje ${escapeHtml(details.score)}</span>
+        ${details.location ? `<span class="muted-meta">Ubicación: ${escapeHtml(details.location)}</span>` : ''}
       </div>
       <div class="tags">
-        ${categories.map(cat => `<span>${cat}</span>`).join('')}
-        ${mechanics.map(mech => `<span>${mech}</span>`).join('')}
+        ${details.categories.slice(0, 3).map(cat => `<span>${escapeHtml(cat)}</span>`).join('')}
+        ${details.mechanics.slice(0, 2).map(mech => `<span>${escapeHtml(mech)}</span>`).join('')}
       </div>
     `;
+
+        card.addEventListener('click', () => openGameDetail(row));
+        card.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                openGameDetail(row);
+            }
+        });
 
         results.appendChild(card);
     });

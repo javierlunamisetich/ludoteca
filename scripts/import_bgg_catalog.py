@@ -278,6 +278,25 @@ def xml_value(node: ET.Element | None, default: str = "") -> str:
     return html.unescape(node.attrib.get("value", default))
 
 
+def xml_text(node: ET.Element | None, default: str = "") -> str:
+    if node is None or node.text is None:
+        return default
+    return clean_text(node.text)
+
+
+def clean_text(value: str) -> str:
+    text = html.unescape(value or "")
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p\s*>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def int_value(node: ET.Element | None, default: int | None = None) -> int | None:
     value = xml_value(node)
     if value in ("", "0"):
@@ -295,6 +314,13 @@ def float_value(node: ET.Element | None, default: float | None = None) -> float 
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def rank_value(node: ET.Element | None) -> int | None:
+    value = xml_value(node)
+    if not value.isdigit():
+        return None
+    return int(value)
 
 
 def complexity_label(weight: float | None) -> str:
@@ -416,14 +442,21 @@ def fetch_bgg_game(bgg_id: str, original_name: str, location: str, sleep_seconds
     min_players = int_value(item.find("minplayers"))
     max_players = int_value(item.find("maxplayers"))
     min_age = int_value(item.find("minage"))
+    year_published = int_value(item.find("yearpublished"))
     min_time = int_value(item.find("minplaytime"))
     max_time = int_value(item.find("maxplaytime"))
     playing_time = int_value(item.find("playingtime"))
     if playing_time is None and min_time is not None and max_time is not None:
         playing_time = round((min_time + max_time) / 2)
 
+    description = xml_text(item.find("description"))
+    image = xml_text(item.find("image"))
+    thumbnail = xml_text(item.find("thumbnail"))
     categories: list[str] = []
     mechanics: list[str] = []
+    families: list[str] = []
+    designers: list[str] = []
+    publishers: list[str] = []
     for link in item.findall("link"):
         link_type = link.attrib.get("type")
         value = html.unescape(link.attrib.get("value", "")).strip()
@@ -433,10 +466,17 @@ def fetch_bgg_game(bgg_id: str, original_name: str, location: str, sleep_seconds
             categories.append(value)
         elif link_type == "boardgamemechanic":
             mechanics.append(value)
+        elif link_type == "boardgamefamily":
+            families.append(value)
+        elif link_type == "boardgamedesigner":
+            designers.append(value)
+        elif link_type == "boardgamepublisher":
+            publishers.append(value)
 
     statistics = item.find("statistics/ratings")
     score = float_value(statistics.find("average") if statistics is not None else None)
     weight = float_value(statistics.find("averageweight") if statistics is not None else None)
+    boardgame_rank = rank_value(statistics.find("ranks/rank[@name='boardgame']") if statistics is not None else None)
     community_players, best_players = parse_player_poll(item)
     community_age = parse_age_poll(item)
 
@@ -454,8 +494,19 @@ def fetch_bgg_game(bgg_id: str, original_name: str, location: str, sleep_seconds
 
     return {
         "bgg_id": bgg_id,
+        "bgg_url": f"https://boardgamegeek.com/boardgame/{bgg_id}",
+        "bgg_detalle_importado": True,
         "juego": name,
         "nombre_excel": original_name,
+        "descripcion": description,
+        "imagen": image,
+        "thumbnail": thumbnail,
+        "anio_publicacion": year_published,
+        "ranking_bgg": boardgame_rank,
+        "autores": designers,
+        "autores_str": ", ".join(designers),
+        "editoriales": publishers,
+        "editoriales_str": ", ".join(publishers),
         "jug_min": min_players,
         "jug_max": max_players,
         "jugadores": players,
@@ -473,6 +524,8 @@ def fetch_bgg_game(bgg_id: str, original_name: str, location: str, sleep_seconds
         "categorias_str": ", ".join(categories),
         "mecanicas": mechanics,
         "mecanicas_str": ", ".join(mechanics),
+        "familias": families,
+        "familias_str": ", ".join(families),
         "score": round(score, 1) if score is not None else None,
         "complejidad_num": round(weight, 1) if weight is not None else None,
         "complejidad": complexity_label(weight),
@@ -565,7 +618,7 @@ def main() -> int:
             progress_bar.set_description(f"Procesando {name[:32]}")
         cache_key = game_cache_key(name)
         existing = existing_by_name.get(cache_key)
-        if existing and not args.refresh_existing:
+        if existing and not args.refresh_existing and existing.get("bgg_detalle_importado"):
             reused = dict(existing)
             if game["location"]:
                 reused["ubicacion"] = game["location"]
@@ -582,10 +635,15 @@ def main() -> int:
         if tqdm is None:
             log_progress(f"[{idx}/{len(input_games)}] Buscando en BGG: {name}")
         try:
-            bgg_id = find_bgg_id(name, args.sleep, args.max_retries)
+            existing_bgg_id = str(existing.get("bgg_id") or "").strip() if existing else ""
+            if existing and not args.refresh_existing and existing_bgg_id:
+                bgg_id = existing_bgg_id
+            else:
+                bgg_id = find_bgg_id(name, args.sleep, args.max_retries)
             if not bgg_id:
                 raise ValueError("sin resultados en BGG")
-            fetched = fetch_bgg_game(bgg_id, name, game["location"], args.sleep, args.max_retries)
+            location = game["location"] or (str(existing.get("ubicacion") or "").strip() if existing else "")
+            fetched = fetch_bgg_game(bgg_id, name, location, args.sleep, args.max_retries)
             rows_by_key[game_cache_key(str(fetched.get("juego") or name))] = fetched
             fetched_count += 1
             fetched_since_pause += 1
